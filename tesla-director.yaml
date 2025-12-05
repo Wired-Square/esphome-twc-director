@@ -1,0 +1,148 @@
+# tesla-director.yaml
+
+substitutions:
+  global_max_current: "48"      # The circuit maximum for all twc
+  global_twc_max_current: "32"  # The circuit maximum per twc
+  master_addr: "0xF00D"         # The 2 byte address of the TWC director
+  twc_0_name: "Slot 0"          # twc 1 Friendly Name
+  twc_0_addr: "0x1234"          # twc 1 address for consistent mapping
+  twc_0_initial_current: "15"   # twc 1 Initial Current
+  twc_0_max_current: "32"       # twc 1 Max Current (upper bound)
+
+esphome:
+  name: tesla-director
+  friendly_name: Tesla-Director
+  project:
+    name: "Wired Square.Tesla Wall Connector Director"
+    version: "v0.0.1"
+  on_boot:
+    priority: 200
+    then:
+      - output.turn_on: tcan485_boost_en        # GPIO16, 5V boost power
+      - output.turn_on: tcan485_rs485_shutdown  # GPIO19, shutdown disable (HIGH = enable)
+      - output.turn_on: tcan485_rs485_re        # GPIO17, receiver enable
+      - delay: 100ms                            # Let RS-485 transceiver stabilize
+      - switch.turn_on: twc_master_mode
+      - number.set:
+          id: twc_0_max_current_num
+          value: ${twc_0_max_current}
+      - number.set:
+          id: twc_0_initial_current_num
+          value: ${twc_0_initial_current}
+      
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/Wired-Square/esphome-twc-director.git
+
+logger:
+  level: VERBOSE
+  initial_level: INFO
+  baud_rate: 0
+
+api:
+  encryption:
+    key: !secret tesla_director_api_key
+
+ota:
+  - platform: esphome
+    password: !secret tesla_director_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Tesla-Director Fallback Hotspot"
+    password: !secret wifi_hotspot_password
+
+web_server:
+  port: 80
+  auth:
+    username: !secret web_username
+    password: !secret web_password
+
+captive_portal:
+    
+# UART on the RS-485 transceiver
+uart:
+  id: twc_uart
+  tx_pin: GPIO22
+  rx_pin: GPIO21
+  baud_rate: 9600
+  stop_bits: 1
+  parity: NONE
+
+output:
+  # Boost power supply enable (BOOST_ENABLE_PIN 16)
+  - platform: gpio
+    id: tcan485_boost_en
+    pin: GPIO16
+
+  # MAX13487E shutdown pin (RS485_SHUTDOWN_PIN 19) - HIGH = enable
+  - platform: gpio
+    id: tcan485_rs485_shutdown
+    pin: GPIO19
+
+  # MAX13487E RE pin (RS485_RE_PIN 17) — HIGH = receive enable
+  - platform: gpio
+    id: tcan485_rs485_re
+    pin: GPIO17
+
+select:
+  - platform: logger
+    name: Tesla Director log level
+    disabled_by_default: true
+
+twc_director:
+  id: twc_component
+  uart_id: twc_uart
+  addr: ${master_addr}
+  global_max_current: ${global_max_current}
+  global_twc_max_current: ${global_twc_max_current}
+  master_mode:
+    id: twc_master_mode
+    #restore_mode: ALWAYS_ON
+  link_ok:
+    name: RS-485 Link
+  evse:
+    - name: ${twc_0_name}
+      #address: ${twc_0_addr}
+      twc_online:
+      firmware_version:
+      meter_current_phase_a:
+        name: ${twc_0_name} Current
+      meter_current_phase_b:
+        disabled_by_default: true
+      meter_current_phase_c:
+        disabled_by_default: true
+      meter_energy_session:
+      meter_energy_total:
+      meter_voltage_phase_a:
+        name: ${twc_0_name} Voltage
+      meter_voltage_phase_b:
+        disabled_by_default: true
+      meter_voltage_phase_c:
+        disabled_by_default: true
+      serial_number:
+      vehicle_connected:
+      vehicle_vin:
+      contactor:
+      contactor_status:
+      available_current_sensor:
+      max_current:
+        id: twc_0_max_current_num
+      max_current_sensor:
+      initial_current:
+        id: twc_0_initial_current_num
+      session_current:
+      session_current_sensor:
+      mode:
+      status_text:
+
