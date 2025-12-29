@@ -33,6 +33,12 @@ size_t twc_build_frame_header(twc_marker_t marker,
     return 0;
   }
 
+  // SAFETY: Block dangerous commands that write to TWC flash memory.
+  // Only block when used with ANNOUNCE marker (0xFC) which triggers flash writes.
+  if (twc_cmd_is_dangerous(marker, cmd)) {
+    return 0;
+  }
+
   out_header[0] = (uint8_t)marker;
   out_header[1] = (uint8_t)cmd;
   out_header[2] = (uint8_t)((address >> 8) & 0xFF);
@@ -491,18 +497,18 @@ size_t twc_build_contactor_frame(uint16_t master_address,
 
 const char *twc_charge_state_to_string(twc_charge_state_t state) {
   switch (state) {
-    case TWC_HB_READY:               return "Ready";
-    case TWC_HB_CHARGING:            return "Charging";
-    case TWC_HB_ERROR:               return "Error";
-    case TWC_HB_WAITING:             return "Waiting";
-    case TWC_HB_NEGOTIATING:         return "Negotiating";
-    case TWC_HB_MAX_CHARGE:          return "Max Charge";
-    case TWC_HB_ADJUSTING:           return "Adjusting";
-    case TWC_HB_CHARGING_CAR_LOW:    return "Charging (Car Limited)";
-    case TWC_HB_CHARGE_STARTED:      return "Charge Started";
-    case TWC_HB_SETTING_LIMIT:       return "Setting Limit";
-    case TWC_HB_ADJUSTMENT_COMPLETE: return "Adjustment Complete";
+    case TWC_HB_READY:                return "Ready";
+    case TWC_HB_CHARGING:             return "Charging";
+    case TWC_HB_ERROR:                return "Error";
+    case TWC_HB_WAITING:              return "Waiting";
+    case TWC_HB_NEGOTIATING:          return "Negotiating";
+    case TWC_HB_MAX_CHARGE:           return "Max Charge";
+    case TWC_HB_ACK_INCREASE_CURRENT: return "Increase Current OK";
+    case TWC_HB_ACK_DECREASE_CURRENT: return "Decrease Current OK";
+    case TWC_HB_CHARGE_STARTED:       return "Charge Started";
+    case TWC_HB_SETTING_LIMIT:        return "Setting Limit";
+    case TWC_HB_ADJUSTMENT_COMPLETE:  return "Adjustment Complete";
     case TWC_HB_UNKNOWN:
-    default:                         return "Unknown";
+    default:                          return "Unknown";
   }
 }

@@ -11,6 +11,7 @@
 #include "esphome/components/sensor/sensor.h"
 #include "esphome/components/switch/switch.h"
 #include "esphome/components/text_sensor/text_sensor.h"
+#include "esphome/components/button/button.h"
 
 extern "C" {
 #include "twc/twc_frame.h"
@@ -50,6 +51,22 @@ class TWCDirectorMasterModeSwitch : public switch_::Switch {
   TWCDirectorComponent *parent_{nullptr};
 };
 
+// Per-EVSE enable switch. When OFF, the TWC Director will not communicate with
+// this EVSE (no heartbeats, no current allocation). This effectively stops charging.
+class TWCDirectorEnableSwitch : public switch_::Switch {
+ public:
+  void set_parent(TWCDirectorComponent *parent, uint16_t address) {
+    this->parent_ = parent;
+    this->address_ = address;
+  }
+
+ protected:
+  void write_state(bool state) override;
+
+  TWCDirectorComponent *parent_{nullptr};
+  uint16_t address_{0};
+};
+
 class TWCDirectorCurrentNumber : public number::Number {
  public:
   enum CurrentType {
@@ -75,6 +92,26 @@ class TWCDirectorCurrentNumber : public number::Number {
   CurrentType type_{TYPE_INITIAL};
 };
 
+// Button entity for relative current adjustment commands (0x06 increase, 0x07 decrease).
+// The actual bus-level behaviour is delegated back to TWCDirectorComponent.
+class TWCDirectorCurrentButton : public button::Button {
+ public:
+  enum ButtonType { INCREASE, DECREASE };
+
+  void set_parent(TWCDirectorComponent *parent, uint16_t address, ButtonType type) {
+    this->parent_ = parent;
+    this->address_ = address;
+    this->type_ = type;
+  }
+
+ protected:
+  void press_action() override;
+
+  TWCDirectorComponent *parent_{nullptr};
+  uint16_t address_{0};
+  ButtonType type_{INCREASE};
+};
+
 class TWCDirectorComponent : public Component, public uart::UARTDevice {
  public:
   explicit TWCDirectorComponent(uart::UARTComponent *parent)
@@ -96,6 +133,13 @@ class TWCDirectorComponent : public Component, public uart::UARTDevice {
   // Called by TWCDirectorContactorSwitch when the contactor switch is toggled.
   // This is where bus-level contactor control will eventually be implemented.
   void request_contactor_state(uint16_t address, bool closed);
+
+  // Called by TWCDirectorCurrentButton when the increase/decrease button is pressed.
+  void request_current_change(uint16_t address, TWCDirectorCurrentButton::ButtonType type);
+
+  // Called by TWCDirectorEnableSwitch when the enable switch is toggled.
+  // When disabled, the TWC Director will not communicate with this EVSE.
+  void set_evse_enabled(uint16_t address, bool enabled);
 
   void add_evse(uint16_t address,
                 binary_sensor::BinarySensor *online,
@@ -120,7 +164,10 @@ class TWCDirectorComponent : public Component, public uart::UARTDevice {
                 number::Number *session_current,
                 sensor::Sensor *session_current_sensor,
                 text_sensor::TextSensor *mode,
-                text_sensor::TextSensor *status_text);
+                text_sensor::TextSensor *status_text,
+                TWCDirectorCurrentButton *increase_current_button,
+                TWCDirectorCurrentButton *decrease_current_button,
+                TWCDirectorEnableSwitch *enable_switch);
 
   void set_link_ok_sensor(binary_sensor::BinarySensor *sensor) {
     this->link_ok_sensor_ = sensor;
@@ -165,8 +212,31 @@ class TWCDirectorComponent : public Component, public uart::UARTDevice {
   void handle_current_number_control(uint16_t address, float value,
                                       TWCDirectorCurrentNumber::CurrentType type);
 
+  // =========================================================================
+  // Timing Constants
+  // =========================================================================
+
   // How often to push metric updates while an EVSE is online.
   static constexpr std::uint32_t METRICS_UPDATE_INTERVAL_MS = 1000U;
+
+  // Maximum number of frames to buffer in the TX queue before dropping oldest.
+  static constexpr std::size_t MAX_TX_QUEUE_SIZE = 8;
+
+  // Interval between SLIP decoder diagnostic log messages.
+  static constexpr std::uint32_t DECODER_STATS_INTERVAL_MS = 60000U;
+
+  // =========================================================================
+  // TX Statistics
+  // =========================================================================
+
+  // Get number of frames successfully queued for transmission.
+  std::uint32_t tx_frames_queued() const { return this->tx_frames_queued_; }
+
+  // Get number of frames dropped due to queue overflow.
+  std::uint32_t tx_frames_dropped() const { return this->tx_frames_dropped_; }
+
+  // Get number of SLIP encode failures.
+  std::uint32_t tx_encode_failures() const { return this->tx_encode_failures_; }
 
   struct EvseEntry {
     uint16_t address;
@@ -198,6 +268,13 @@ class TWCDirectorComponent : public Component, public uart::UARTDevice {
     sensor::Sensor *session_current_sensor{nullptr};
     text_sensor::TextSensor *mode{nullptr};
     text_sensor::TextSensor *status_text{nullptr};
+    TWCDirectorCurrentButton *increase_current_button{nullptr};
+    TWCDirectorCurrentButton *decrease_current_button{nullptr};
+    TWCDirectorEnableSwitch *enable_switch{nullptr};
+
+    // Whether this EVSE is enabled for communication. When false, the TWC Director
+    // will not send heartbeats or current allocations to this EVSE.
+    bool enabled{true};
 
     // Last operator-set currents (amps) for this EVSE, used to avoid
     // re-applying the same setpoint on every loop.
@@ -206,6 +283,15 @@ class TWCDirectorComponent : public Component, public uart::UARTDevice {
 
     // Last time we pushed a metrics update for this EVSE while online.
     std::uint32_t last_metrics_publish_ms{0};
+
+    // Previous status code for detecting state transitions (e.g., to "Setting limit")
+    int last_status_code{-1};
+
+    // Track last contactor switch state we published to avoid redundant updates
+    bool last_contactor_switch_state{false};
+
+    // Track previous session amps to detect 0 → >0 transition for syncing session current number
+    float last_session_amps{0.0f};
   };
 
   // Helper methods that avoid redundant entity updates.
@@ -275,6 +361,11 @@ class TWCDirectorComponent : public Component, public uart::UARTDevice {
 
   // Optional runtime-adjustable global max current control (limited to global_max_current_a_)
   number::Number *global_max_current_control_{nullptr};
+
+  // TX statistics for diagnostics
+  std::uint32_t tx_frames_queued_{0};
+  std::uint32_t tx_frames_dropped_{0};
+  std::uint32_t tx_encode_failures_{0};
 
   // Core TWC state (C99 library) used for presence/online tracking,
   // automatic EVSE binding, and real-world metrics/orchestration.

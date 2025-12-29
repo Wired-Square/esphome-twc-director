@@ -20,6 +20,12 @@ uint16_t twc_controller_get_master_address(void) {
 }
 
 // =============================================================================
+// FORWARD DECLARATIONS
+// =============================================================================
+
+static void reconcile_session_current_allocation(twc_core_t *core);
+
+// =============================================================================
 // DEVICE REGISTRY
 // =============================================================================
 
@@ -44,13 +50,23 @@ static twc_core_device_t *ensure_device(twc_core_t *core, uint16_t address) {
     if (!dev->present) {
       memset(dev, 0, sizeof(*dev));
       dev->present = true;
+      dev->enabled = true;  // Enabled by default
       dev->address = address;
+      dev->max_current_a = TWC_MAX_DEVICE_CURRENT_A;  // Default max current
       twc_device_init(&dev->device, address);
       return dev;
     }
   }
 
   return NULL;  // Registry full
+}
+
+// Get effective max current for a device (uses configured value or default)
+static float get_device_max_current(const twc_core_device_t *dev) {
+  if (dev && dev->max_current_a > 0.0f) {
+    return dev->max_current_a;
+  }
+  return TWC_MAX_DEVICE_CURRENT_A;
 }
 
 // =============================================================================
@@ -64,7 +80,7 @@ void twc_core_init(twc_core_t *core) {
   core->master_address = 0xF00D;
   g_twcc_master_address = core->master_address;
   core->global_max_current_a = 0.0f;
-  core->online_timeout_ms = 15000u;
+  core->online_timeout_ms = TWC_DEFAULT_ONLINE_TIMEOUT_MS;
   core->master_mode = false;
 }
 
@@ -87,7 +103,12 @@ uint16_t twc_core_get_master_address(const twc_core_t *core) {
 
 void twc_core_set_global_max_current(twc_core_t *core, float max_current_a) {
   if (core) {
+    float old_max = core->global_max_current_a;
     core->global_max_current_a = (max_current_a > 0.0f) ? max_current_a : 0.0f;
+    // If global max changed, recalculate session current allocation
+    if (core->global_max_current_a != old_max) {
+      reconcile_session_current_allocation(core);
+    }
   }
 }
 
@@ -246,7 +267,17 @@ bool twc_core_handle_frame(twc_core_t *core,
 
   // Sync negotiation metrics
   dev->peripheral_session = twc_device_get_peripheral_session(&dev->device);
+  float old_current_available = dev->current_available_a;
   dev->current_available_a = twc_device_get_current_available_a(&dev->device);
+
+  // Detect when a TWC starts or stops drawing current - triggers session reconciliation
+  bool was_drawing = (old_current_available > 0.0f);
+  bool now_drawing = (dev->current_available_a > 0.0f);
+  if (was_drawing != now_drawing) {
+    dev->last_current_available_a = old_current_available;
+    // Trigger session current reconciliation when charging state changes
+    reconcile_session_current_allocation(core);
+  }
 
   // MASTER MODE: Auto-respond to unconfigured peripherals
   if (core->master_mode && core->tx_cb &&
@@ -278,8 +309,6 @@ bool twc_core_handle_frame(twc_core_t *core,
 // =============================================================================
 
 static bool handle_startup_burst(twc_core_t *core, uint32_t now_ms) {
-  const uint32_t BURST_INTERVAL_MS = 200u;
-
   if (!core->startup_burst_active) {
     return false;
   }
@@ -288,15 +317,15 @@ static bool handle_startup_burst(twc_core_t *core, uint32_t now_ms) {
                          ? (now_ms - core->startup_burst_last_ms)
                          : 0u;
 
-  if (elapsed < BURST_INTERVAL_MS) {
+  if (elapsed < TWC_STARTUP_BURST_INTERVAL_MS) {
     return false;
   }
 
   uint8_t frame[16];
   size_t frame_len = 0;
 
-  // Send 5x E1, then 4x E2
-  if (core->startup_burst_e1_sent < 5u) {
+  // Send E1 frames, then E2 frames
+  if (core->startup_burst_e1_sent < TWC_STARTUP_BURST_E1_COUNT) {
     frame_len = twc_build_controller_negotiation_frame(
         core->master_address,
         core->master_session_id,
@@ -308,7 +337,7 @@ static bool handle_startup_burst(twc_core_t *core, uint32_t now_ms) {
       core->startup_burst_last_ms = now_ms;
       return true;
     }
-  } else if (core->startup_burst_e2_sent < 4u) {
+  } else if (core->startup_burst_e2_sent < TWC_STARTUP_BURST_E2_COUNT) {
     frame_len = twc_build_peripheral_pause_frame(
         core->master_address,
         core->master_session_id,
@@ -343,10 +372,11 @@ static void reconcile_current_allocation(twc_core_t *core) {
       continue;
     }
 
-    // Clamp to [0, 32A]
+    // Clamp to [0, max device current]
     float desired = dev->desired_initial_current_a;
+    float dev_max = get_device_max_current(dev);
     if (desired < 0.0f) desired = 0.0f;
-    if (desired > 32.0f) desired = 32.0f;
+    if (desired > dev_max) desired = dev_max;
 
     per_device_desired[eligible_count] = desired;
     eligible_indices[eligible_count] = i;
@@ -395,10 +425,86 @@ static void reconcile_current_allocation(twc_core_t *core) {
   }
 }
 
-static bool send_info_probe(twc_core_t *core, uint32_t now_ms) {
-  const uint32_t INFO_PROBE_INTERVAL_MS = 2000u;
-  const uint32_t POST_HEARTBEAT_DELAY_MS = 500u;
+// Check if a TWC is in a charging-related state
+static bool is_charging_state(int status_code) {
+  switch (status_code) {
+    case TWC_HB_CHARGING:            // 0x01 - Actively charging
+    case TWC_HB_CHARGE_STARTED:      // 0x08 - Charging just started
+    case TWC_HB_SETTING_LIMIT:       // 0x09 - Setting current limit
+    case TWC_HB_ADJUSTMENT_COMPLETE: // 0x0A - Adjustment complete
+      return true;
+    default:
+      return false;
+  }
+}
 
+// Reconcile session current allocation across actively charging TWCs
+// Considers devices that are drawing current OR in a charging-related state
+static void reconcile_session_current_allocation(twc_core_t *core) {
+  float per_device_desired[TWC_CORE_MAX_DEVICES];
+  int eligible_indices[TWC_CORE_MAX_DEVICES];
+  int eligible_count = 0;
+  float total_desired = 0.0f;
+
+  // Gather eligible peripherals (actively charging)
+  for (int i = 0; i < TWC_CORE_MAX_DEVICES; ++i) {
+    twc_core_device_t *dev = &core->devices[i];
+    if (!dev->present) continue;
+
+    twc_mode_t mode = twc_device_get_mode(&dev->device);
+    if (mode != TWC_MODE_PERIPHERAL && mode != TWC_MODE_UNCONF_PERIPHERAL) {
+      continue;
+    }
+
+    // Include devices that are drawing current OR in a charging state
+    int status = twc_device_get_status_code(&dev->device);
+    bool is_drawing = (dev->current_available_a > 0.0f);
+    bool is_charging = is_charging_state(status);
+    if (!is_drawing && !is_charging) {
+      continue;
+    }
+
+    // Clamp to [0, max device current]
+    float desired = dev->desired_session_current_a;
+    float dev_max = get_device_max_current(dev);
+    if (desired < 0.0f) desired = 0.0f;
+    if (desired > dev_max) desired = dev_max;
+
+    per_device_desired[eligible_count] = desired;
+    eligible_indices[eligible_count] = i;
+    total_desired += desired;
+    eligible_count++;
+  }
+
+  // Compute scaling factor
+  float scale = 1.0f;
+  if (core->global_max_current_a > 0.0f &&
+      total_desired > core->global_max_current_a) {
+    scale = core->global_max_current_a / total_desired;
+    if (scale < 0.0f) scale = 0.0f;
+    if (scale > 1.0f) scale = 1.0f;
+  }
+
+  // Apply scaled currents
+  for (int n = 0; n < eligible_count; ++n) {
+    int idx = eligible_indices[n];
+    twc_core_device_t *dev = &core->devices[idx];
+
+    float applied = per_device_desired[n] * scale;
+    if (applied < 0.0f) applied = 0.0f;
+
+    bool changed = (dev->applied_session_current_a != applied);
+    dev->applied_session_current_a = applied;
+
+    // Schedule 0x09 command when applied value changes
+    if (changed) {
+      dev->pending_session_current_cmd = true;
+      dev->last_session_current_cmd_a = applied;
+    }
+  }
+}
+
+static bool send_info_probe(twc_core_t *core, uint32_t now_ms) {
   for (int i = 0; i < TWC_CORE_MAX_DEVICES; ++i) {
     twc_core_device_t *dev = &core->devices[i];
     if (!dev->present) continue;
@@ -412,13 +518,13 @@ static bool send_info_probe(twc_core_t *core, uint32_t now_ms) {
       uint32_t since_e0 = (now_ms >= core->last_e0_heartbeat_ms)
                               ? (now_ms - core->last_e0_heartbeat_ms)
                               : 0u;
-      if (since_e0 < POST_HEARTBEAT_DELAY_MS) continue;
+      if (since_e0 < TWC_POST_HEARTBEAT_DELAY_MS) continue;
     }
 
     uint32_t elapsed = (now_ms >= dev->last_info_probe_ms)
                            ? (now_ms - dev->last_info_probe_ms)
                            : 0u;
-    if (elapsed < INFO_PROBE_INTERVAL_MS) continue;
+    if (elapsed < TWC_INFO_PROBE_INTERVAL_MS) continue;
 
     // Determine probe command
     twc_cmd_t probe_cmd;
@@ -457,13 +563,11 @@ static bool send_info_probe(twc_core_t *core, uint32_t now_ms) {
 }
 
 static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
-  const uint32_t HEARTBEAT_INTERVAL_MS = 1000u;
-
   if (core->last_e0_heartbeat_ms != 0u) {
     uint32_t elapsed = (now_ms >= core->last_e0_heartbeat_ms)
                            ? (now_ms - core->last_e0_heartbeat_ms)
                            : 0u;
-    if (elapsed < HEARTBEAT_INTERVAL_MS) {
+    if (elapsed < TWC_HEARTBEAT_INTERVAL_MS) {
       return false;
     }
   }
@@ -475,6 +579,9 @@ static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
 
     twc_core_device_t *dev = &core->devices[idx];
     if (!dev->present) continue;
+
+    // Skip disabled devices - no communication when disabled
+    if (!dev->enabled) continue;
 
     twc_mode_t mode = twc_device_get_mode(&dev->device);
     if (mode != TWC_MODE_PERIPHERAL && mode != TWC_MODE_UNCONF_PERIPHERAL) {
@@ -492,11 +599,13 @@ static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
       available_centiamps = 0u;
       delivered_centiamps = 0u;
     } else {
+      float dev_max = get_device_max_current(dev);
+
       // Prioritize 0x09 session current over 0x05 initial current
       if (dev->pending_session_current_cmd) {
         float current_a = dev->last_session_current_cmd_a;
         if (current_a < 0.0f) current_a = 0.0f;
-        if (current_a > 32.0f) current_a = 32.0f;
+        if (current_a > dev_max) current_a = dev_max;
 
         charge_state = 0x09u;
         available_centiamps = (uint16_t)(current_a * 100.0f + 0.5f);
@@ -504,10 +613,20 @@ static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
       } else if (dev->pending_initial_current_cmd) {
         float current_a = dev->last_initial_current_cmd_a;
         if (current_a < 0.0f) current_a = 0.0f;
-        if (current_a > 32.0f) current_a = 32.0f;
+        if (current_a > dev_max) current_a = dev_max;
 
         charge_state = 0x05u;
         available_centiamps = (uint16_t)(current_a * 100.0f + 0.5f);
+        delivered_centiamps = 0u;
+      } else if (dev->pending_increase_current_cmd) {
+        // Increase current command (0x06)
+        charge_state = 0x06u;
+        available_centiamps = 0u;
+        delivered_centiamps = 0u;
+      } else if (dev->pending_decrease_current_cmd) {
+        // Decrease current command (0x07)
+        charge_state = 0x07u;
+        available_centiamps = 0u;
         delivered_centiamps = 0u;
       } else {
         // Normal heartbeat: all zeros
@@ -545,6 +664,10 @@ static bool send_heartbeat(twc_core_t *core, uint32_t now_ms) {
       dev->pending_initial_current_cmd = false;
     } else if (charge_state == 0x09u) {
       dev->pending_session_current_cmd = false;
+    } else if (charge_state == 0x06u) {
+      dev->pending_increase_current_cmd = false;
+    } else if (charge_state == 0x07u) {
+      dev->pending_decrease_current_cmd = false;
     }
 
     if (dev->e0_since_last_probe < 255u) {
@@ -650,7 +773,13 @@ void twc_core_set_max_current(twc_core_t *core,
   if (!core) return;
   twc_core_device_t *dev = ensure_device(core, address);
   if (dev) {
+    float old_max = dev->max_current_a;
     dev->max_current_a = (current_a > 0.0f) ? current_a : 0.0f;
+    // If max current changed, recalculate session current allocation
+    // to enforce the new limit on actively charging TWCs
+    if (dev->max_current_a != old_max) {
+      reconcile_session_current_allocation(core);
+    }
   }
 }
 
@@ -683,6 +812,8 @@ void twc_core_set_desired_session_current(twc_core_t *core,
   twc_core_device_t *dev = ensure_device(core, address);
   if (dev) {
     dev->desired_session_current_a = (current_a > 0.0f) ? current_a : 0.0f;
+    // Trigger reconciliation to apply global max constraint
+    reconcile_session_current_allocation(core);
   }
 }
 
@@ -700,4 +831,46 @@ float twc_core_get_applied_initial_current(const twc_core_t *core,
 
 uint32_t twc_core_get_restart_counter(const twc_core_device_t *dev) {
   return dev ? dev->restart_counter : 0u;
+}
+
+// =============================================================================
+// CURRENT ADJUSTMENT COMMANDS
+// =============================================================================
+
+void twc_core_send_increase_current(twc_core_t *core, uint16_t address) {
+  if (!core || !core->master_mode) return;
+  twc_core_device_t *dev = twc_core_get_device_by_address(core, address);
+  if (dev && dev->present) {
+    dev->pending_increase_current_cmd = true;
+  }
+}
+
+void twc_core_send_decrease_current(twc_core_t *core, uint16_t address) {
+  if (!core || !core->master_mode) return;
+  twc_core_device_t *dev = twc_core_get_device_by_address(core, address);
+  if (dev && dev->present) {
+    dev->pending_decrease_current_cmd = true;
+  }
+}
+
+// =============================================================================
+// DEVICE ENABLE/DISABLE
+// =============================================================================
+
+void twc_core_set_device_enabled(twc_core_t *core,
+                                  uint16_t address,
+                                  bool enabled) {
+  if (!core) return;
+  twc_core_device_t *dev = twc_core_get_device_by_address(core, address);
+  if (dev && dev->present) {
+    dev->enabled = enabled;
+  }
+}
+
+bool twc_core_get_device_enabled(const twc_core_t *core,
+                                  uint16_t address) {
+  if (!core) return false;
+  int idx = find_device_index(core, address);
+  if (idx < 0) return false;
+  return core->devices[idx].enabled;
 }

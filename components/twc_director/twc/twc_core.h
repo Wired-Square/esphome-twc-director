@@ -27,6 +27,50 @@
 #endif
 
 // =============================================================================
+// TIMING CONSTANTS
+// =============================================================================
+
+// Default timeout for considering a device offline (milliseconds)
+#ifndef TWC_DEFAULT_ONLINE_TIMEOUT_MS
+#define TWC_DEFAULT_ONLINE_TIMEOUT_MS 15000U
+#endif
+
+// Interval between heartbeat frames to peripherals (milliseconds)
+#ifndef TWC_HEARTBEAT_INTERVAL_MS
+#define TWC_HEARTBEAT_INTERVAL_MS 1000U
+#endif
+
+// Interval between info probe requests (VIN, serial, meter, etc.) (milliseconds)
+#ifndef TWC_INFO_PROBE_INTERVAL_MS
+#define TWC_INFO_PROBE_INTERVAL_MS 2000U
+#endif
+
+// Delay after heartbeat before sending info probe (milliseconds)
+#ifndef TWC_POST_HEARTBEAT_DELAY_MS
+#define TWC_POST_HEARTBEAT_DELAY_MS 500U
+#endif
+
+// Interval between startup burst frames (milliseconds)
+#ifndef TWC_STARTUP_BURST_INTERVAL_MS
+#define TWC_STARTUP_BURST_INTERVAL_MS 200U
+#endif
+
+// Number of E1 frames to send during startup burst
+#ifndef TWC_STARTUP_BURST_E1_COUNT
+#define TWC_STARTUP_BURST_E1_COUNT 5U
+#endif
+
+// Number of E2 frames to send during startup burst
+#ifndef TWC_STARTUP_BURST_E2_COUNT
+#define TWC_STARTUP_BURST_E2_COUNT 4U
+#endif
+
+// Maximum current per device (amps) - safety clamp
+#ifndef TWC_MAX_DEVICE_CURRENT_A
+#define TWC_MAX_DEVICE_CURRENT_A 32.0f
+#endif
+
+// =============================================================================
 // TYPES
 // =============================================================================
 
@@ -72,6 +116,7 @@ struct twc_core_device {
   // Identity
   uint16_t address;
   bool present;
+  bool enabled;  // When false, master mode will not communicate with this device
   
   // Activity timestamps
   uint32_t last_frame_ms;         // Any frame from this device
@@ -85,12 +130,18 @@ struct twc_core_device {
   float desired_initial_current_a; // What operator wants for initial (0x05 frame)
   float desired_session_current_a; // What operator wants for session (0x09 frame)
   float applied_initial_current_a; // What we actually send (after scaling)
+  float applied_session_current_a; // What we actually send for session (after scaling)
+
+  // Change detection for session current reconciliation
+  float last_current_available_a;  // Previous current_available for edge detection
 
   // Pending commands (master mode only)
   bool  pending_initial_current_cmd;
   float last_initial_current_cmd_a;
   bool  pending_session_current_cmd;
   float last_session_current_cmd_a;
+  bool  pending_increase_current_cmd;
+  bool  pending_decrease_current_cmd;
 
   // Edge detection
   bool last_vehicle_connected;
@@ -250,3 +301,30 @@ float twc_core_get_applied_initial_current(const twc_core_t *core,
                                            const twc_core_device_t *dev);
 
 uint32_t twc_core_get_restart_counter(const twc_core_device_t *dev);
+
+// =============================================================================
+// CURRENT ADJUSTMENT COMMANDS (master mode only)
+// =============================================================================
+
+// Queue an increase current command (0x06) for the specified device.
+// The command will be sent in the next heartbeat cycle.
+void twc_core_send_increase_current(twc_core_t *core, uint16_t address);
+
+// Queue a decrease current command (0x07) for the specified device.
+// The command will be sent in the next heartbeat cycle.
+void twc_core_send_decrease_current(twc_core_t *core, uint16_t address);
+
+// =============================================================================
+// DEVICE ENABLE/DISABLE (master mode only)
+// =============================================================================
+
+// Enable or disable a device for master mode communication.
+// When disabled, the master will not send heartbeats or current allocations
+// to this device, effectively stopping charging.
+void twc_core_set_device_enabled(twc_core_t *core,
+                                  uint16_t address,
+                                  bool enabled);
+
+// Check if a device is enabled for master mode communication.
+bool twc_core_get_device_enabled(const twc_core_t *core,
+                                  uint16_t address);

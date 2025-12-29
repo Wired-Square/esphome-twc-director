@@ -3,7 +3,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 
-from esphome.components import uart, switch, binary_sensor, text_sensor, sensor, number
+from esphome.components import uart, switch, binary_sensor, text_sensor, sensor, number, button
 from esphome.const import (
     CONF_ID,
     CONF_UART_ID,
@@ -22,7 +22,7 @@ from esphome.const import (
 )
 
 DEPENDENCIES = ["uart"]
-AUTO_LOAD = ["binary_sensor", "number", "sensor", "switch", "text_sensor"]
+AUTO_LOAD = ["binary_sensor", "button", "number", "sensor", "switch", "text_sensor"]
 
 twc_director_ns = cg.esphome_ns.namespace("twc_director")
 TWCDirectorComponent = twc_director_ns.class_(
@@ -36,6 +36,12 @@ TWCDirectorContactorSwitch = twc_director_ns.class_(
 )
 TWCDirectorCurrentNumber = twc_director_ns.class_(
     "TWCDirectorCurrentNumber", number.Number
+)
+TWCDirectorCurrentButton = twc_director_ns.class_(
+    "TWCDirectorCurrentButton", button.Button
+)
+TWCDirectorEnableSwitch = twc_director_ns.class_(
+    "TWCDirectorEnableSwitch", switch.Switch
 )
 
 CONF_MASTER_MODE = "master_mode"
@@ -72,6 +78,9 @@ CONF_SESSION_CURRENT = "session_current"
 CONF_SESSION_CURRENT_SENSOR = "session_current_sensor"
 CONF_MODE = "mode"
 CONF_STATUS_TEXT = "status_text"
+CONF_INCREASE_CURRENT = "increase_current"
+CONF_DECREASE_CURRENT = "decrease_current"
+CONF_ENABLE = "enable"
 
 
 # --- Helper: Ensure named child for EVSE nested entities ---
@@ -121,6 +130,9 @@ def _evse_preprocess(config):
     _ensure_named_child(config, CONF_METER_VOLTAGE_PHASE_C, "Voltage Phase C")
     _ensure_named_child(config, CONF_METER_ENERGY_TOTAL, "Energy Meter Total")
     _ensure_named_child(config, CONF_METER_ENERGY_SESSION, "Energy Meter Session")
+    _ensure_named_child(config, CONF_INCREASE_CURRENT, "Increase Current")
+    _ensure_named_child(config, CONF_DECREASE_CURRENT, "Decrease Current")
+    _ensure_named_child(config, CONF_ENABLE, "Enable")
     return config
 
 # --- Helper: Default name factory for top-level entities ---
@@ -290,6 +302,21 @@ CONFIG_SCHEMA = (
                                 icon=ICON_FLASH,
                                 device_class=DEVICE_CLASS_ENERGY,
                                 state_class=STATE_CLASS_MEASUREMENT,
+                            ),
+                            # Current adjustment buttons
+                            cv.Optional(CONF_INCREASE_CURRENT): button.button_schema(
+                                TWCDirectorCurrentButton,
+                                icon="mdi:plus-circle",
+                            ),
+                            cv.Optional(CONF_DECREASE_CURRENT): button.button_schema(
+                                TWCDirectorCurrentButton,
+                                icon="mdi:minus-circle",
+                            ),
+                            # Enable/disable switch for this EVSE
+                            cv.Optional(CONF_ENABLE): switch.switch_schema(
+                                TWCDirectorEnableSwitch,
+                                icon="mdi:power",
+                                default_restore_mode="RESTORE_DEFAULT_ON",
                             ),
                         }
                     ),
@@ -515,6 +542,24 @@ async def to_code(config):
                     evse_conf[CONF_METER_ENERGY_SESSION]
                 )
 
+            # Optional current adjustment buttons
+            increase_current_btn = cg.nullptr
+            if CONF_INCREASE_CURRENT in evse_conf:
+                increase_current_btn = await button.new_button(
+                    evse_conf[CONF_INCREASE_CURRENT]
+                )
+
+            decrease_current_btn = cg.nullptr
+            if CONF_DECREASE_CURRENT in evse_conf:
+                decrease_current_btn = await button.new_button(
+                    evse_conf[CONF_DECREASE_CURRENT]
+                )
+
+            # Optional enable/disable switch
+            enable_sw = cg.nullptr
+            if CONF_ENABLE in evse_conf:
+                enable_sw = await switch.new_switch(evse_conf[CONF_ENABLE])
+
             # Register the EVSE with the core component
             cg.add(
                 var.add_evse(
@@ -542,5 +587,8 @@ async def to_code(config):
                     session_current_sensor_ent,
                     mode_text,
                     status_text,
+                    increase_current_btn,
+                    decrease_current_btn,
+                    enable_sw,
                 )
             )

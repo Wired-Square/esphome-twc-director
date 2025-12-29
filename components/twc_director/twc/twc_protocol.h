@@ -53,40 +53,86 @@ if (twc_decode_frame(rx_frame, rx_len, &header, &payload, &payload_len)) {
 
 // On-wire TWC markers (direction) and commands.
 // Keeping these here ensures all protocol users share a single source of truth.
+//
+// Marker semantics:
+//   0xFB (REQUEST)  - Query from master to peripheral, expects 0xFD response
+//   0xFC (ANNOUNCE) - Command/broadcast from master, no response expected
+//                     WARNING: Some 0xFC commands WRITE TO FLASH on the TWC!
+//   0xFD (RESPONSE) - Response from peripheral to master
 typedef enum {
-  TWC_MARKER_REQUEST  = 0xFB,  // request from controller/master to a peripheral
-  TWC_MARKER_RESPONSE = 0xFD,  // response from peripheral to controller/master
-  TWC_MARKER_ANNOUNCE = 0xFC,  // controller/master broadcast/announce (e.g. E1 session)
+  TWC_MARKER_REQUEST  = 0xFB,  // Request from controller/master to a peripheral
+  TWC_MARKER_RESPONSE = 0xFD,  // Response from peripheral to controller/master
+  TWC_MARKER_ANNOUNCE = 0xFC,  // Controller/master broadcast/announce (e.g. E1 session)
+                               // WARNING: Some commands with this marker write to TWC flash!
 } twc_marker_t;
 
 typedef enum {
-  TWC_CMD_CLOSE_CONTACTORS        = 0xB1,
-  TWC_CMD_OPEN_CONTACTORS         = 0xB2,
-  TWC_CMD_HEARTBEAT               = 0xE0,
-  TWC_CMD_CONTROLLER_NEGOTIATION  = 0xE1,
-  TWC_CMD_PERIPHERAL_NEGOTIATION  = 0xE2,
-  TWC_CMD_METER                   = 0xEB,
-  TWC_CMD_VERSION                 = 0xEC,
-  TWC_CMD_SERIAL                  = 0xED,
-  TWC_CMD_VIN_HI                  = 0xEE,
-  TWC_CMD_VIN_MID                 = 0xEF,
-  TWC_CMD_VIN_LO                  = 0xF1,
+  // ==========================================================================
+  // DANGEROUS COMMANDS - These write to TWC flash memory!
+  // DO NOT USE unless you know exactly what you're doing.
+  // These are defined here so they can be explicitly blocked.
+  // ==========================================================================
+  TWC_CMD_WRITE_ID_DATE           = 0x19,  // DANGEROUS: Writes ID/date to flash
+  TWC_CMD_WRITE_MODEL_NUMBER      = 0x1A,  // DANGEROUS: Writes model number to flash
+
+  // ==========================================================================
+  // Idle/keepalive
+  // ==========================================================================
+  TWC_CMD_IDLE                    = 0x1D,  // Idle message (no-op keepalive)
+
+  // ==========================================================================
+  // Contactor control (used with 0xFC marker)
+  // ==========================================================================
+  TWC_CMD_CLOSE_CONTACTORS        = 0xB1,  // Start charging (close contactors)
+  TWC_CMD_OPEN_CONTACTORS         = 0xB2,  // Stop charging (open contactors)
+  TWC_CMD_PLUG_STATE              = 0xB4,  // Query plug state
+
+  // ==========================================================================
+  // Heartbeat and negotiation
+  // ==========================================================================
+  TWC_CMD_HEARTBEAT               = 0xE0,  // Primary/secondary heartbeat
+  TWC_CMD_CONTROLLER_NEGOTIATION  = 0xE1,  // Controller presence announcement
+  TWC_CMD_PERIPHERAL_NEGOTIATION  = 0xE2,  // Peripheral presence/negotiation
+
+  // ==========================================================================
+  // Information queries (used with 0xFB marker, responses on 0xFD)
+  // ==========================================================================
+  TWC_CMD_METER                   = 0xEB,  // Power/energy meter data
+  TWC_CMD_VERSION                 = 0xEC,  // Firmware version (extended)
+  TWC_CMD_SERIAL                  = 0xED,  // Serial number
+  TWC_CMD_VIN_HI                  = 0xEE,  // Vehicle VIN (first segment)
+  TWC_CMD_VIN_MID                 = 0xEF,  // Vehicle VIN (middle segment)
+  TWC_CMD_VIN_LO                  = 0xF1,  // Vehicle VIN (last segment)
 } twc_cmd_t;
+
+// =============================================================================
+// COMMAND SAFETY HELPERS
+// =============================================================================
+
+// Check if a command is dangerous (writes to TWC flash)
+// Only dangerous when used with TWC_MARKER_ANNOUNCE (0xFC) - that marker
+// triggers flash writes on the TWC. With other markers these are safe queries.
+static inline bool twc_cmd_is_dangerous(twc_marker_t marker, twc_cmd_t cmd) {
+  if (marker != TWC_MARKER_ANNOUNCE) {
+    return false;  // Only 0xFC marker triggers flash writes
+  }
+  return (cmd == TWC_CMD_WRITE_ID_DATE || cmd == TWC_CMD_WRITE_MODEL_NUMBER);
+}
 
 // E0 frame charge_state
 typedef enum {
-  TWC_HB_READY               = 0x00,
-  TWC_HB_CHARGING            = 0x01,
-  TWC_HB_ERROR               = 0x02,
-  TWC_HB_WAITING             = 0x03,
-  TWC_HB_NEGOTIATING         = 0x04,
-  TWC_HB_MAX_CHARGE          = 0x05,
-  TWC_HB_ADJUSTING           = 0x06,
-  TWC_HB_CHARGING_CAR_LOW    = 0x07,
-  TWC_HB_CHARGE_STARTED      = 0x08,
-  TWC_HB_SETTING_LIMIT       = 0x09,
-  TWC_HB_ADJUSTMENT_COMPLETE = 0x0A,
-  TWC_HB_UNKNOWN             = 0xFF,
+  TWC_HB_READY                 = 0x00,
+  TWC_HB_CHARGING              = 0x01,
+  TWC_HB_ERROR                 = 0x02,
+  TWC_HB_WAITING               = 0x03,
+  TWC_HB_NEGOTIATING           = 0x04,
+  TWC_HB_MAX_CHARGE            = 0x05,
+  TWC_HB_ACK_INCREASE_CURRENT  = 0x06,
+  TWC_HB_ACK_DECREASE_CURRENT  = 0x07,
+  TWC_HB_CHARGE_STARTED        = 0x08,
+  TWC_HB_SETTING_LIMIT         = 0x09,
+  TWC_HB_ADJUSTMENT_COMPLETE   = 0x0A,
+  TWC_HB_UNKNOWN               = 0xFF,
 } twc_charge_state_t;
 
 // =============================================================================
