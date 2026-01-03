@@ -199,17 +199,17 @@ The `current_available` field is encoded as centi‑amps; for example, `3200` re
 
 Payload layout (as observed from decoded frames):
 
-| Field       | Size (bytes) | Type    | Notes                          |
-|-------------|--------------|---------|--------------------------------|
-| total_kwh   | 4            | uint32  | Cumulative energy counter      |
-| phase_l2_v  | 1            | uint8   | Line‑to‑neutral or phase L2 V  |
-| phase_l1_v  | 1            | uint8   | Phase L1 voltage               |
-| phase_l3_v  | 1            | uint8   | Phase L3 voltage               |
-| separator   | 2            | uint16  | Reserved / separator           |
-| phase_l2_i  | 1            | uint8   | Phase L2 current (scaled)      |
-| phase_l1_i  | 1            | uint8   | Phase L1 current (scaled)      |
-| phase_l3_i  | 1            | uint8   | Phase L3 current (scaled)      |
-| padding     | 3            | bytes   | Reserved / padding             |
+| Field       | Size (bytes) | Type    | Scale | Notes                          |
+|-------------|--------------|---------|-------|--------------------------------|
+| total_kwh   | 4            | uint32  | 1     | Cumulative energy counter      |
+| phase_l2_v  | 1            | uint8   | 1     | Line‑to‑neutral or phase L2 V  |
+| phase_l1_v  | 1            | uint8   | 1     | Phase L1 voltage               |
+| phase_l3_v  | 1            | uint8   | 1     | Phase L3 voltage               |
+| separator   | 2            | uint16  | -     | Reserved / separator           |
+| phase_l2_i  | 1            | uint8   | 0.5   | Phase L2 current (scaled)      |
+| phase_l1_i  | 1            | uint8   | 0.5   | Phase L1 current (scaled)      |
+| phase_l3_i  | 1            | uint8   | 0.5   | Phase L3 current (scaled)      |
+| padding     | 3            | bytes   | -     | Reserved / padding             |
 
 In practice, `total_kwh` is reported in kWh units by the Wall Connector and does not require additional scaling. Phase currents are encoded as unsigned integers in 0.5 A steps (the reference implementation divides the raw values by 2.0 to obtain amps).
 
@@ -281,16 +281,16 @@ The `charge_state` field in status payloads uses the following values:
 |-------|---------------------|---------------------------------------------|
 | 0x00  | READY               | Idle and ready to accept a vehicle          |
 | 0x01  | CHARGING            | Charging normally                           |
-| 0x02  | ERROR               | Fault present                                |
+| 0x02  | ERROR               | Fault present                               |
 | 0x03  | WAITING             | Waiting for a vehicle / handshake           |
-| 0x04  | NEGOTIATING         | In current‑sharing negotiation               |
-| 0x05  | MAX_CHARGE          | At maximum allowed current                   |
-| 0x06  | ADJUSTING           | Adjusting current allocation                 |
-| 0x07  | CHARGING_CAR_LOW    | Charging at vehicle‑limited rate             |
-| 0x08  | CHARGE_STARTED      | Recent transition to charging                |
-| 0x09  | SETTING_LIMIT       | Updating current/session limits              |
-| 0x0A  | ADJUSTMENT_COMPLETE | Completed a current adjustment cycle         |
-| 0xFF  | UNKNOWN             | Reserved / unknown                           |
+| 0x04  | NEGOTIATING         | In current‑sharing negotiation              |
+| 0x05  | MAX_CHARGE          | At maximum allowed current                  |
+| 0x06  | ADJUSTING_UP        | Adjusting current allocation up 2A          |
+| 0x07  | ADJUSTING_DOWN      | Adjusting current allocation down 2A        |
+| 0x08  | CHARGE_STARTED      | Recent transition to charging               |
+| 0x09  | SETTING_LIMIT       | Updating current/session limits             |
+| 0x0A  | ADJUSTMENT_COMPLETE | Completed a current adjustment cycle        |
+| 0xFF  | UNKNOWN             | Reserved / unknown                          |
 
 These names follow the reference decoder implementation; exact semantics are based on observed behaviour and may differ slightly between firmware versions.
 

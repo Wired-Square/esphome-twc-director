@@ -23,7 +23,7 @@ uint16_t twc_controller_get_master_address(void) {
 // FORWARD DECLARATIONS
 // =============================================================================
 
-static void reconcile_session_current_allocation(twc_core_t *core);
+static void reconcile_session_current_allocation(twc_core_t *core, uint16_t priority_address);
 
 // =============================================================================
 // DEVICE REGISTRY
@@ -107,7 +107,7 @@ void twc_core_set_global_max_current(twc_core_t *core, float max_current_a) {
     core->global_max_current_a = (max_current_a > 0.0f) ? max_current_a : 0.0f;
     // If global max changed, recalculate session current allocation
     if (core->global_max_current_a != old_max) {
-      reconcile_session_current_allocation(core);
+      reconcile_session_current_allocation(core, 0);  // No priority device
     }
   }
 }
@@ -276,7 +276,7 @@ bool twc_core_handle_frame(twc_core_t *core,
   if (was_drawing != now_drawing) {
     dev->last_current_available_a = old_current_available;
     // Trigger session current reconciliation when charging state changes
-    reconcile_session_current_allocation(core);
+    reconcile_session_current_allocation(core, 0);  // No priority device
   }
 
   // MASTER MODE: Auto-respond to unconfigured peripherals
@@ -439,14 +439,17 @@ static bool is_charging_state(int status_code) {
 }
 
 // Reconcile session current allocation across actively charging TWCs
-// Considers devices that are drawing current OR in a charging-related state
-static void reconcile_session_current_allocation(twc_core_t *core) {
+// Uses priority-based allocation: the device that triggered the change (priority_address)
+// gets its requested current first, then remaining capacity is allocated to others.
+// If priority_address is 0, uses proportional scaling as fallback.
+static void reconcile_session_current_allocation(twc_core_t *core, uint16_t priority_address) {
   float per_device_desired[TWC_CORE_MAX_DEVICES];
+  float per_device_applied[TWC_CORE_MAX_DEVICES];
   int eligible_indices[TWC_CORE_MAX_DEVICES];
   int eligible_count = 0;
-  float total_desired = 0.0f;
+  int priority_idx = -1;  // Index into eligible arrays for priority device
 
-  // Gather eligible peripherals (actively charging)
+  // Gather eligible peripherals (actively charging or in charging state)
   for (int i = 0; i < TWC_CORE_MAX_DEVICES; ++i) {
     twc_core_device_t *dev = &core->devices[i];
     if (!dev->present) continue;
@@ -470,27 +473,71 @@ static void reconcile_session_current_allocation(twc_core_t *core) {
     if (desired < 0.0f) desired = 0.0f;
     if (desired > dev_max) desired = dev_max;
 
+    // Track if this is the priority device
+    if (dev->address == priority_address) {
+      priority_idx = eligible_count;
+    }
+
     per_device_desired[eligible_count] = desired;
+    per_device_applied[eligible_count] = 0.0f;
     eligible_indices[eligible_count] = i;
-    total_desired += desired;
     eligible_count++;
   }
 
-  // Compute scaling factor
-  float scale = 1.0f;
-  if (core->global_max_current_a > 0.0f &&
-      total_desired > core->global_max_current_a) {
-    scale = core->global_max_current_a / total_desired;
-    if (scale < 0.0f) scale = 0.0f;
-    if (scale > 1.0f) scale = 1.0f;
+  // If no global max or no devices, just apply desired values directly
+  if (core->global_max_current_a <= 0.0f || eligible_count == 0) {
+    for (int n = 0; n < eligible_count; ++n) {
+      int idx = eligible_indices[n];
+      twc_core_device_t *dev = &core->devices[idx];
+      float applied = per_device_desired[n];
+
+      bool changed = (dev->applied_session_current_a != applied);
+      dev->applied_session_current_a = applied;
+      if (changed) {
+        dev->pending_session_current_cmd = true;
+        dev->last_session_current_cmd_a = applied;
+      }
+    }
+    return;
   }
 
-  // Apply scaled currents
+  float remaining_capacity = core->global_max_current_a;
+
+  // Priority-based allocation: give priority device its requested current first
+  if (priority_idx >= 0) {
+    float priority_desired = per_device_desired[priority_idx];
+    float priority_applied = (priority_desired <= remaining_capacity)
+                              ? priority_desired
+                              : remaining_capacity;
+    per_device_applied[priority_idx] = priority_applied;
+    remaining_capacity -= priority_applied;
+  }
+
+  // Allocate remaining capacity to other devices proportionally
+  float other_total_desired = 0.0f;
+  for (int n = 0; n < eligible_count; ++n) {
+    if (n == priority_idx) continue;
+    other_total_desired += per_device_desired[n];
+  }
+
+  if (other_total_desired > 0.0f) {
+    float scale = (remaining_capacity >= other_total_desired)
+                  ? 1.0f
+                  : remaining_capacity / other_total_desired;
+    if (scale < 0.0f) scale = 0.0f;
+    if (scale > 1.0f) scale = 1.0f;
+
+    for (int n = 0; n < eligible_count; ++n) {
+      if (n == priority_idx) continue;
+      per_device_applied[n] = per_device_desired[n] * scale;
+    }
+  }
+
+  // Apply the calculated currents
   for (int n = 0; n < eligible_count; ++n) {
     int idx = eligible_indices[n];
     twc_core_device_t *dev = &core->devices[idx];
-
-    float applied = per_device_desired[n] * scale;
+    float applied = per_device_applied[n];
     if (applied < 0.0f) applied = 0.0f;
 
     bool changed = (dev->applied_session_current_a != applied);
@@ -778,7 +825,7 @@ void twc_core_set_max_current(twc_core_t *core,
     // If max current changed, recalculate session current allocation
     // to enforce the new limit on actively charging TWCs
     if (dev->max_current_a != old_max) {
-      reconcile_session_current_allocation(core);
+      reconcile_session_current_allocation(core, 0);  // No priority device
     }
   }
 }
@@ -812,8 +859,10 @@ void twc_core_set_desired_session_current(twc_core_t *core,
   twc_core_device_t *dev = ensure_device(core, address);
   if (dev) {
     dev->desired_session_current_a = (current_a > 0.0f) ? current_a : 0.0f;
-    // Trigger reconciliation to apply global max constraint
-    reconcile_session_current_allocation(core);
+    // Trigger reconciliation with this device as priority
+    // This ensures the explicitly-set device gets its requested current first,
+    // and other devices are scaled down to fit within global max
+    reconcile_session_current_allocation(core, address);
   }
 }
 
