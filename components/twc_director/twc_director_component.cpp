@@ -454,8 +454,22 @@ void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
   // Status text from E0 status byte
   int status_code = twc_device_get_status_code(dev);
   const char *status_str = twc_charge_state_to_string(static_cast<twc_charge_state_t>(status_code));
-  this->publish_text_sensor_if_changed_(evse.status_text, status_str);
 
+  // Log status transitions with current values for debugging
+  if (evse.last_status_code != -1 && status_code != evse.last_status_code) {
+    const char *old_status_str = twc_charge_state_to_string(
+        static_cast<twc_charge_state_t>(evse.last_status_code));
+
+    float available_a = twc_core_get_current_available_a(core_dev);
+    float applied_initial_a = core_dev->applied_initial_current_a;
+    float desired_initial_a = core_dev->desired_initial_current_a;
+
+    ESP_LOGI(TAG, "TWC 0x%04X: %s -> %s (available=%.1fA, applied=%.1fA, desired=%.1fA)",
+             evse.address, old_status_str, status_str,
+             available_a, applied_initial_a, desired_initial_a);
+  }
+
+  this->publish_text_sensor_if_changed_(evse.status_text, status_str);
   evse.last_status_code = status_code;
 
   // Contactor status (always publish, even if offline)
