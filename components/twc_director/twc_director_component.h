@@ -165,6 +165,7 @@ class TWCDirectorComponent : public Component, public uart::UARTDevice {
                 sensor::Sensor *session_current_sensor,
                 text_sensor::TextSensor *mode,
                 text_sensor::TextSensor *status_text,
+                text_sensor::TextSensor *status_log,
                 TWCDirectorCurrentButton *increase_current_button,
                 TWCDirectorCurrentButton *decrease_current_button,
                 TWCDirectorEnableSwitch *enable_switch);
@@ -268,6 +269,7 @@ class TWCDirectorComponent : public Component, public uart::UARTDevice {
     sensor::Sensor *session_current_sensor{nullptr};
     text_sensor::TextSensor *mode{nullptr};
     text_sensor::TextSensor *status_text{nullptr};
+    text_sensor::TextSensor *status_log{nullptr};
     TWCDirectorCurrentButton *increase_current_button{nullptr};
     TWCDirectorCurrentButton *decrease_current_button{nullptr};
     TWCDirectorEnableSwitch *enable_switch{nullptr};

@@ -29,6 +29,9 @@ esphome:
       - number.set:
           id: twc_0_initial_current_num
           value: ${twc_0_initial_current}
+  on_shutdown:
+    then:
+      - output.turn_off: tcan485_boost_en       # Disable GPIO16 before reset to avoid boot hang
       
 esp32:
   board: esp32dev
@@ -148,4 +151,5 @@ twc_director:
       session_current_sensor:
       mode:
       status_text:
+      status_log:
 

@@ -78,6 +78,7 @@ CONF_SESSION_CURRENT = "session_current"
 CONF_SESSION_CURRENT_SENSOR = "session_current_sensor"
 CONF_MODE = "mode"
 CONF_STATUS_TEXT = "status_text"
+CONF_STATUS_LOG = "status_log"
 CONF_INCREASE_CURRENT = "increase_current"
 CONF_DECREASE_CURRENT = "decrease_current"
 CONF_ENABLE = "enable"
@@ -122,6 +123,7 @@ def _evse_preprocess(config):
     _ensure_named_child(config, CONF_SESSION_CURRENT_SENSOR, "Session Current")
     _ensure_named_child(config, CONF_MODE, "Mode")
     _ensure_named_child(config, CONF_STATUS_TEXT, "Status")
+    _ensure_named_child(config, CONF_STATUS_LOG, "Status Log")
     _ensure_named_child(config, CONF_METER_CURRENT_PHASE_A, "Current Phase A")
     _ensure_named_child(config, CONF_METER_CURRENT_PHASE_B, "Current Phase B")
     _ensure_named_child(config, CONF_METER_CURRENT_PHASE_C, "Current Phase C")
@@ -251,6 +253,9 @@ CONFIG_SCHEMA = (
                             cv.Optional(CONF_MODE): text_sensor.text_sensor_schema(),
                             cv.Optional(CONF_STATUS_TEXT): text_sensor.text_sensor_schema(
                                 icon="mdi:information-outline",
+                            ),
+                            cv.Optional(CONF_STATUS_LOG): text_sensor.text_sensor_schema(
+                                icon="mdi:history",
                             ),
                             # Per-phase current sensors (A)
                             cv.Optional(CONF_METER_CURRENT_PHASE_A): sensor.sensor_schema(
@@ -491,6 +496,12 @@ async def to_code(config):
                     evse_conf[CONF_STATUS_TEXT]
                 )
 
+            status_log = cg.nullptr
+            if CONF_STATUS_LOG in evse_conf:
+                status_log = await text_sensor.new_text_sensor(
+                    evse_conf[CONF_STATUS_LOG]
+                )
+
             # Optional per-phase current sensors
             current_phase_a_sensor = cg.nullptr
             if CONF_METER_CURRENT_PHASE_A in evse_conf:
@@ -587,6 +598,7 @@ async def to_code(config):
                     session_current_sensor_ent,
                     mode_text,
                     status_text,
+                    status_log,
                     increase_current_btn,
                     decrease_current_btn,
                     enable_sw,

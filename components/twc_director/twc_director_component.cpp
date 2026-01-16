@@ -467,6 +467,15 @@ void TWCDirectorComponent::update_evse_sensors_(EvseEntry &evse, uint32_t now) {
     ESP_LOGI(TAG, "TWC 0x%04X: %s -> %s (available=%.1fA, applied=%.1fA, desired=%.1fA)",
              evse.address, old_status_str, status_str,
              available_a, applied_initial_a, desired_initial_a);
+
+    // Publish to status_log text sensor for Home Assistant history
+    if (evse.status_log) {
+      char log_msg[128];
+      snprintf(log_msg, sizeof(log_msg), "%s -> %s (%.1fA/%.1fA/%.1fA)",
+               old_status_str, status_str,
+               available_a, applied_initial_a, desired_initial_a);
+      evse.status_log->publish_state(log_msg);
+    }
   }
 
   this->publish_text_sensor_if_changed_(evse.status_text, status_str);
@@ -951,6 +960,7 @@ void TWCDirectorComponent::add_evse(
     sensor::Sensor *session_current_sensor,
     text_sensor::TextSensor *mode,
     text_sensor::TextSensor *status_text,
+    text_sensor::TextSensor *status_log,
     TWCDirectorCurrentButton *increase_current_button,
     TWCDirectorCurrentButton *decrease_current_button,
     TWCDirectorEnableSwitch *enable_switch) {
@@ -963,6 +973,7 @@ void TWCDirectorComponent::add_evse(
   entry.online = online;
   entry.mode = mode;
   entry.status_text = status_text;
+  entry.status_log = status_log;
   entry.firmware_version = firmware_version;
   entry.serial_number = serial_number;
   entry.vehicle_connected = vehicle_connected;
